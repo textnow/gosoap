@@ -52,11 +52,11 @@ main() {
 	if err != nil {
 		fmt.Printf("Unable to validate: %s\n", err.Error())
 		return
-	} else if call.Response.StatusCode != http.StatusOK {
-		fmt.Printf("Unable to validate (status code invalid): %d\n", call.Response.StatusCode)
+	} else if soapResp.StatusCode != http.StatusOK {
+		fmt.Printf("Unable to validate (status code invalid): %d\n", soapResp.StatusCode)
 		return
-	} else if call.Response.Fault() != nil {
-		fmt.Printf("SOAP fault experienced during call: %s\n", call.Response.Fault().Error())
+	} else if soapResp.Fault() != nil {
+		fmt.Printf("SOAP fault experienced during call: %s\n", soapResp.Fault().Error())
 		// We can access the FaultData struct passed in for a type-safe way to get at the details.
 		return
 	}
