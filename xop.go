@@ -91,6 +91,8 @@ func getFieldByName(element reflect.Value, name string) (reflect.Value, error) {
 	return reflect.Value{}, errFieldNotFound
 }
 
+// This assumes, if it encounters an array field, that it will be filling in the first field and continuing
+// TODO: support arbitrary array size.
 func getFieldByXMLTagPrefix(element reflect.Value, prefix string) (reflect.Value, error) {
 	if element.Kind() == reflect.Interface || element.Kind() == reflect.Ptr {
 		element = element.Elem()
