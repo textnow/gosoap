@@ -4,12 +4,13 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"github.com/beevik/etree"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
 	"reflect"
 	"strings"
+
+	"github.com/beevik/etree"
 )
 
 // Implements an XOP decoder.
@@ -24,6 +25,13 @@ var (
 	ErrMultipartBodyEmpty = errors.New("multi-part body is empty")
 	// ErrCannotSetBytesElement is an internal error that suggests our parse tree is malformed
 	ErrCannotSetBytesElement = errors.New("cannot set the bytes element")
+	// ErrMissingXOPPart is returned if the decoded body was missing the XOP header
+	ErrMissingXOPPart = errors.New("did not find an xop part for this multipart message")
+)
+
+var (
+	errFieldNotFound = errors.New("field not found")
+	errFieldNotArray = errors.New("field not an array")
 )
 
 type xopDecoder struct {
@@ -41,7 +49,7 @@ func newXopDecoder(r io.Reader, mediaParams map[string]string) *xopDecoder {
 	return d
 }
 
-func getXopContentIDIncludePath(element *etree.Element) (string, []string) {
+func (d *xopDecoder) getXopContentIDIncludePath(element *etree.Element, path []string) {
 	for _, token := range element.Child {
 		switch token := token.(type) {
 		case *etree.Element:
@@ -49,7 +57,7 @@ func getXopContentIDIncludePath(element *etree.Element) (string, []string) {
 			href := ""
 
 			for _, attr := range token.Attr {
-				if attr.Key == ns {
+				if attr.Key == "xmlns" {
 					ns = attr.Value
 				} else if attr.Key == "href" {
 					href = attr.Value
@@ -59,24 +67,104 @@ func getXopContentIDIncludePath(element *etree.Element) (string, []string) {
 			if ns == xopNS && token.Tag == "Include" {
 				cleanedHref := strings.Replace(href, "cid:", "", 1)
 				// This is a super ugly hack reflecting how these URIs are stored in the HTTP header
-				return "<" + cleanedHref + ">", []string{}
+				// This is an ugly way to make sure we copy the value of path without subsequent modifications
+				d.includes["<" + cleanedHref + ">"] = append([]string(nil), path...)
+				break
 			}
 
-			retHref, retPath := getXopContentIDIncludePath(token)
-
-			if len(retHref) > 0 {
-				return retHref, append([]string{token.Tag}, retPath...)
-			}
+			d.getXopContentIDIncludePath(token, append(path, []string{token.Tag}...))
 		default:
 			continue
 		}
 	}
+}
 
-	return "", []string{}
+func getFieldByName(element reflect.Value, name string) (reflect.Value, error) {
+	for i := 0; i < element.NumField(); i++ {
+		rTypeField := element.Type().Field(i)
+		rValueField := element.Field(i)
+
+		if rTypeField.Name == name {
+			return rValueField, nil
+		}
+	}
+	return reflect.Value{}, errFieldNotFound
+}
+
+// This assumes, if it encounters an array field, that it will be filling in the first field and continuing
+// TODO: support arbitrary array size.
+func getFieldByXMLTagPrefix(element reflect.Value, prefix string) (reflect.Value, error) {
+	if element.Kind() == reflect.Interface || element.Kind() == reflect.Ptr {
+		element = element.Elem()
+	}
+	if element.Kind() == reflect.Array || element.Kind() == reflect.Slice {
+		return getFieldByXMLTagPrefix(element.Index(0), prefix)
+	}
+	if element.Kind() != reflect.Struct {
+		return reflect.Value{}, errFieldNotFound
+	}
+
+	for i := 0; i < element.NumField(); i++ {
+		rTypeField := element.Type().Field(i)
+		rValueField := element.Field(i)
+
+		if tagValue, tagOk := rTypeField.Tag.Lookup("xml"); tagOk {
+			if !strings.HasPrefix(tagValue, prefix) {
+				continue
+			}
+
+			return rValueField, nil
+		}
+	}
+	return reflect.Value{}, errFieldNotFound
+}
+
+func getFieldFromIncludePath(val reflect.Value, path []string) (reflect.Value, error) {
+	if path[0] != "Body" {
+		return reflect.Value{}, fmt.Errorf("invalid Include path (should start with Body): %v", path)
+	}
+
+	// WARNING: Dragons below.
+	// We iterate the Content struct.
+	// We attempt to confirm that this is the proper object to store the data in, by
+	// examining the XMLName field and confirming that it matches the first element found in the XOP include path.
+	// Next, we attempt to find the field identified by the subsequent elements found in the XOP include path
+	// by looking for the XML tag that matches then repeating until we reach the end of the include path.
+	// We use HasPrefix, instead of ==, because often the tag includes ',omitempty' as a trailer.
+	// Once we've got it, we return the element.
+
+	rXMLName, err := getFieldByName(val.Elem(), "XMLName")
+	if err != nil {
+		return rXMLName, err
+	}
+
+	// The XMLName field has 2 properties; one called 'Space' and one called 'Local'.
+	// We only care about 'Local' right now.
+	// We assume the namespace is correct if the local name is correct.
+	for i := 0; i < rXMLName.NumField(); i++ {
+		rXMLTypeField := rXMLName.Type().Field(i)
+		rXMLValueField := rXMLName.Field(i)
+
+		if rXMLTypeField.Name == "Local" && rXMLValueField.String() != path[1] {
+			return reflect.Value{}, fmt.Errorf("invalid XML object path, expected %s, got %s", rXMLValueField.String(), path[1])
+		}
+	}
+
+	rValueField := val.Elem()
+	for i := 2; i < len(path); i++ {
+		rValueField, err = getFieldByXMLTagPrefix(rValueField, path[i])
+		if err != nil {
+			return rValueField, err
+		}
+	}
+
+	return rValueField, nil
 }
 
 func (d *xopDecoder) decode(respEnvelope *Envelope) error {
 	parts := multipart.NewReader(d.reader, d.mediaParams["boundary"])
+	parsedXOPHeader := false
+	partNumber := 0
 
 	for {
 		part, err := parts.NextPart()
@@ -86,9 +174,16 @@ func (d *xopDecoder) decode(respEnvelope *Envelope) error {
 			return err
 		} else if part == nil {
 			return ErrMultipartBodyEmpty
+		} else if !parsedXOPHeader && partNumber > 0 {
+			return ErrMissingXOPPart
 		}
 
+		partNumber++
+
+		// If the content-type is xop+xml it means we have our first object, the one we will be storing things in.
+		// Find the include paths in it, store them, and then we'll proceed to the rest of the parts to put them into this document.
 		if strings.Contains(part.Header.Get("Content-Type"), "application/xop+xml") {
+			parsedXOPHeader = true
 			doc := etree.NewDocument()
 			_, err = doc.ReadFrom(part)
 			if err != nil {
@@ -97,11 +192,7 @@ func (d *xopDecoder) decode(respEnvelope *Envelope) error {
 
 			root := doc.Root()
 
-			xopHref, xopObjPath := getXopContentIDIncludePath(root)
-
-			if len(xopHref) > 0 {
-				d.includes[xopHref] = xopObjPath
-			}
+			d.getXopContentIDIncludePath(root, nil)
 
 			pipeReader, pipeWriter := io.Pipe()
 
@@ -121,74 +212,35 @@ func (d *xopDecoder) decode(respEnvelope *Envelope) error {
 				break
 			}
 
-			// Don't break here; we want to loop through and decode the XOP includes we found in the XML body above.
-		} else if strings.Contains(part.Header.Get("Content-Type"), "application/octet-stream") {
-			if xopObjPath, ok := d.includes[part.Header.Get("Content-ID")]; ok {
-				if xopObjPath[0] != "Body" {
-					return fmt.Errorf("invalid XOP Include object path (should start with Body): %v", xopObjPath)
-				}
+			// We do not attempt to handle the 'parts' parsing here. That will come on subsequent loop iterations.
+			continue
+		}
 
-				partBytes, err := ioutil.ReadAll(part)
-				if err != nil {
-					return err
-				}
+		// We're now going through the part to put this part into the proper 'bytes' field of the struct deserialized above.
+		if xopObjPath, ok := d.includes[part.Header.Get("Content-ID")]; ok {
+			// We kind of cheat here and skip the normal 'Envelope/Body' parsing since we know the format
+			// of the message is valid if we properly deserialized the XML object above.
+			// We only support envelope-encoded messages at this point anyways,
+			// and it prevents us from needing to hack around with the generic Content interface stuff here.
+			rResponse := reflect.ValueOf(respEnvelope.Body.Content)
 
-				// We kind of cheat here and skip the normal 'Envelope/Body' parsing since we know the format
-				// of the message is valid if we properly deserialized the XML object above.
-				// We only support envelope-encoded messages at this point anyways,
-				// and it prevents us from needing to hack around with the generic Content interface stuff here.
-				rResponse := reflect.ValueOf(respEnvelope.Body.Content).Elem()
-
-				// WARNING: Dragons below.
-				// We iterate the Content struct.
-				// We attempt to confirm that this is the proper object to store the data in, by
-				// examining the XMLName field and confirming that it matches the first element found in the XOP include path.
-				// Next, we attempt to find the field identified by the second element found in the XOP include path
-				// by looking for the XML tag that matches.
-				// We use Contains, instead of ==, because often the tag includes ',omitempty' as a trailer.
-				// Once we've got it, we confirm we can set it and then call SetBytes on the element.
-				for i := 0; i < rResponse.NumField(); i++ {
-					rTypeField := rResponse.Type().Field(i)
-					rValueField := rResponse.Field(i)
-
-					if rTypeField.Name == "XMLName" {
-						rXMLName := rValueField
-
-						// The XMLName field has 2 properties; one called 'Space' and one called 'Local'.
-						// We only care about 'Local' right now.
-						// We assume the namespace is correct if the local name is correct.
-						for j := 0; j < rXMLName.NumField(); j++ {
-							rXMLTypeField := rXMLName.Type().Field(i)
-							rXMLValueField := rXMLName.Field(i)
-
-							if rXMLTypeField.Name == "Local" && rXMLValueField.String() != xopObjPath[1] {
-								return fmt.Errorf("invalid XML object path, expected %s, got %s", rXMLValueField.String(), xopObjPath[1])
-							}
-						}
-					} else if tagValue, tagOk := rTypeField.Tag.Lookup("xml"); tagOk {
-						if !strings.Contains(tagValue, xopObjPath[2]) {
-							continue
-						}
-
-						bytesElem := rValueField.Elem()
-
-						if !bytesElem.CanSet() {
-							return ErrCannotSetBytesElement
-						}
-
-						bytesElem.SetBytes(partBytes)
-					}
-				}
-				break
-			}
-		} else {
-			// If we have a multipart message with anything else, assume it isn't XOP formatted and return here.
-			err = xml.NewDecoder(part).Decode(&respEnvelope)
+			field, err := getFieldFromIncludePath(rResponse, xopObjPath)
 			if err != nil {
 				return err
 			}
 
-			break
+			// TODO: Double check this is a byte array
+			if !field.CanSet() {
+				return ErrCannotSetBytesElement
+			}
+
+			// We don't read the content until we know we're able to save it (no point reading something we'll never store).
+			partBytes, err := ioutil.ReadAll(part)
+			if err != nil {
+				return err
+			}
+
+			field.SetBytes(partBytes)
 		}
 	}
 
