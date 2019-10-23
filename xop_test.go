@@ -14,7 +14,39 @@ type DataType string
 type RunTimeSeriesReportResponse struct {
 	XMLName xml.Name `xml:"RunTimeSeriesReportResponse"`
 
+	*ReportResponse
+}
+
+type ReportResponse struct {
+	*DelegateServiceResponse
+
 	Report *Report `xml:"Report,omitempty"`
+}
+
+type DelegateServiceResponse struct {
+	XMLName xml.Name `xml:"delegateServiceResponse"`
+
+	*ResponseData
+}
+
+type ResponseData struct {
+	Result Result `xml:"Result,omitempty"`
+
+	Errors Errors `xml:"Errors,omitempty"`
+
+	RequestProcessingTime int64 `xml:"RequestProcessingTime,omitempty"`
+}
+
+type Result string
+
+type Errors struct {
+	Error []*Error `xml:"Error,omitempty"`
+}
+
+type Error struct {
+	Code string `xml:"Code,omitempty"`
+
+	Message string `xml:"Message,omitempty"`
 }
 
 type Report struct {
