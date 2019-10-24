@@ -107,7 +107,7 @@ func getFieldFromPath(val reflect.Value, path []string) (reflect.Value, error) {
 		valueField = unwrapValue(valueField)
 
 		// check if the value was unwrapped completely
-		if valueField.Type().Kind() == reflect.Slice || valueField.Type().Kind() == reflect.Slice || valueField.Type().Kind() == reflect.Ptr {
+		if valueField.Type().Kind() == reflect.Array || valueField.Type().Kind() == reflect.Slice || valueField.Type().Kind() == reflect.Ptr {
 			// if valueField is in path
 			if getNameFromTag(tag) == path[0] {
 				// if valueField is the desired field, return
@@ -127,7 +127,7 @@ func getFieldFromPath(val reflect.Value, path []string) (reflect.Value, error) {
 		if typeField.Anonymous {
 			result, err := getFieldFromPath(valueField, path)
 			if err == nil {
-				return result, err
+				return result, nil
 			}
 
 			continue
@@ -187,6 +187,10 @@ func unwrapValue(val reflect.Value) reflect.Value {
 	return val
 }
 
+// getNameFromTag gets the name from an xml tag
+// tags take the form: "-" or "namespace name,flag1,flag2,..."
+// the namespace, name and flags are all optional
+// a tag cannot contain a namespace but not a name
 func getNameFromTag(tag string) string {
 	// if the tag is not set then there is no name to obtain
 	if tag == "" {
@@ -204,22 +208,24 @@ func getNameFromTag(tag string) string {
 // getExplicitXMLName gets the xml name which is explicitly set in the xml tag on the XMLName field
 func getExplicitXMLName(val reflect.Value) string {
 	// only a value of type reflect.Struct can have an XMLName field
-	if val.Type().Kind() == reflect.Struct {
-		// get the XMLName from the XMLName field, if possible
-		for i := 0; i < val.NumField(); i++ {
-			typeField := val.Type().Field(i)
+	if val.Type().Kind() != reflect.Struct {
+		return ""
+	}
 
-			if typeField.Name == xmlName {
-				// get the XMLName
-				name := getNameFromTag(typeField.Tag.Get("xml"))
+	// get the XMLName from the XMLName field, if possible
+	for i := 0; i < val.NumField(); i++ {
+		typeField := val.Type().Field(i)
 
-				// if the name has been set, return
-				if name != "" {
-					return name
-				}
+		if typeField.Name == xmlName {
+			// get the XMLName
+			name := getNameFromTag(typeField.Tag.Get("xml"))
 
-				break
+			// if the name has been set, return
+			if name != "" {
+				return name
 			}
+
+			break
 		}
 	}
 

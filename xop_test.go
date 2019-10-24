@@ -145,3 +145,52 @@ func TestMultipartResponseWithCSV(t *testing.T) {
 	assert.Equal(t, "tn_prod-e03d921e-ed56-4d51-826d-c54f0288bfef,2019-08-19T10:20:59.000Z,332682498\n", string(testResp.Report.DataSets.DataSet[0].CsvAttachment.CsvData))
 	assert.Equal(t, int32(1), testResp.Report.NumberOfDataSets)
 }
+
+func TestGetNameFromTag(t *testing.T) {
+	var TestGetNameFromTag = []struct {
+		testName string
+		tag      string
+		xmlName  string
+	}{
+		{
+			testName: "omitted field tag",
+			tag: "-",
+			xmlName: "-",
+		},
+		{
+			testName: "tag with everything",
+			tag:      "namespace name,flag1,flag2",
+			xmlName:  "name",
+		},
+		{
+			testName: "missing namespace",
+			tag:      "name,flag1,flag2",
+			xmlName:  "name",
+		},
+		{
+			testName: "missing flags",
+			tag:      "namespace name",
+			xmlName:  "name",
+		},
+		{
+			testName: "flags only",
+			tag:      ",flag1,flag2",
+			xmlName:  "",
+		},
+		{
+			testName: "name only",
+			tag:      "name",
+			xmlName:  "name",
+		},
+		{
+			testName: "nothing",
+			tag:      "",
+			xmlName:  "",
+		},
+	}
+
+	for _, tt := range TestGetNameFromTag {
+		xmlName := getNameFromTag(tt.tag)
+		assert.Equal(t, tt.xmlName, xmlName)
+	}
+}
