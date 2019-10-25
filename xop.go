@@ -3,7 +3,6 @@ package soap
 import (
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"mime/multipart"
@@ -18,6 +17,7 @@ import (
 
 const (
 	xopNS = "http://www.w3.org/2004/08/xop/include"
+	xmlName = "XMLName"
 )
 
 var (
@@ -79,86 +79,158 @@ func (d *xopDecoder) getXopContentIDIncludePath(element *etree.Element, path []s
 	}
 }
 
-func getFieldByName(element reflect.Value, name string) (reflect.Value, error) {
-	for i := 0; i < element.NumField(); i++ {
-		rTypeField := element.Type().Field(i)
-		rValueField := element.Field(i)
+func getFieldFromPath(val reflect.Value, path []string) (reflect.Value, error) {
+	val = unwrapValue(val)
 
-		if rTypeField.Name == name {
-			return rValueField, nil
-		}
-	}
-	return reflect.Value{}, errFieldNotFound
-}
-
-// This assumes, if it encounters an array field, that it will be filling in the first field and continuing
-// TODO: support arbitrary array size.
-func getFieldByXMLTagPrefix(element reflect.Value, prefix string) (reflect.Value, error) {
-	if element.Kind() == reflect.Interface || element.Kind() == reflect.Ptr {
-		element = element.Elem()
-	}
-	if element.Kind() == reflect.Array || element.Kind() == reflect.Slice {
-		return getFieldByXMLTagPrefix(element.Index(0), prefix)
-	}
-	if element.Kind() != reflect.Struct {
+	// val must be a struct and path must have length > 0
+	if val.Type().Kind() != reflect.Struct || len(path) == 0 {
 		return reflect.Value{}, errFieldNotFound
 	}
 
-	for i := 0; i < element.NumField(); i++ {
-		rTypeField := element.Type().Field(i)
-		rValueField := element.Field(i)
+	// search the struct fields with the path
+	for i := 0; i < val.NumField(); i++ {
+		typeField := val.Type().Field(i)
+		valueField := val.Field(i)
+		tag := typeField.Tag.Get("xml")
 
-		if tagValue, tagOk := rTypeField.Tag.Lookup("xml"); tagOk {
-			if !strings.HasPrefix(tagValue, prefix) {
-				continue
+		// skip the XMLName field
+		if typeField.Name == xmlName {
+			continue
+		}
+
+		// skip omitted fields
+		if tag == "-" {
+			continue
+		}
+
+		// unwrap the value
+		valueField = unwrapValue(valueField)
+
+		// check if the value was unwrapped completely
+		if valueField.Type().Kind() == reflect.Array || valueField.Type().Kind() == reflect.Slice || valueField.Type().Kind() == reflect.Ptr {
+			// if valueField is in path
+			if getNameFromTag(tag) == path[0] {
+				// if valueField is the desired field, return
+				if len(path) == 1 {
+					return valueField, nil
+				}
+
+				// valueField is empty, there is nothing more to search
+				return reflect.Value{}, errFieldNotFound
 			}
 
-			return rValueField, nil
+			// valueField is not in path
+			continue
+		}
+
+		// if the field is an embedded struct, search its fields
+		if typeField.Anonymous {
+			result, err := getFieldFromPath(valueField, path)
+			if err == nil {
+				return result, nil
+			}
+
+			continue
+		}
+
+		// in the following order, get the field's XML name from
+		// - the tag on the field
+		// - the tag of the XMLName field of valueField, if it is a struct
+		// - the name of the field type
+		fieldName := ""
+		if fieldName = getNameFromTag(tag); fieldName == "" {
+			if fieldName = getExplicitXMLName(valueField); fieldName == "" {
+				fieldName = typeField.Name
+			}
+		}
+
+		// once the next elem in the path is found, restart with it as root
+		if fieldName == path[0] {
+			if len(path) == 1 {
+				return valueField, nil
+			}
+
+			return getFieldFromPath(valueField, path[1:])
 		}
 	}
+
 	return reflect.Value{}, errFieldNotFound
 }
 
-func getFieldFromIncludePath(val reflect.Value, path []string) (reflect.Value, error) {
-	if path[0] != "Body" {
-		return reflect.Value{}, fmt.Errorf("invalid Include path (should start with Body): %v", path)
+// Unwrap value as much as possible. A value can no longer be unwrapped if:
+// - it is an empty array or slice
+// - it is a nil pointer
+// This assumes, if it encounters an array field, that it will be filling in the first field and continuing
+// TODO: support arbitrary array size.
+func unwrapValue(val reflect.Value) reflect.Value {
+	// if the value is an interface or pointer, get its value
+	if val.Type().Kind() == reflect.Ptr || val.Type().Kind() == reflect.Interface {
+		// if the value is a nil pointer
+		if val.IsNil() {
+			return val
+		}
+
+		return unwrapValue(val.Elem())
 	}
 
-	// WARNING: Dragons below.
-	// We iterate the Content struct.
-	// We attempt to confirm that this is the proper object to store the data in, by
-	// examining the XMLName field and confirming that it matches the first element found in the XOP include path.
-	// Next, we attempt to find the field identified by the subsequent elements found in the XOP include path
-	// by looking for the XML tag that matches then repeating until we reach the end of the include path.
-	// We use HasPrefix, instead of ==, because often the tag includes ',omitempty' as a trailer.
-	// Once we've got it, we return the element.
+	// if the value is an array or a slice, assume that we are looking for its first element
+	if val.Type().Kind() == reflect.Slice || val.Type().Kind() == reflect.Array {
+		// if the value is an empty array or slice
+		if val.Cap() == 0 {
+			return val
+		}
 
-	rXMLName, err := getFieldByName(val.Elem(), "XMLName")
-	if err != nil {
-		return rXMLName, err
+		return unwrapValue(val.Index(0))
 	}
 
-	// The XMLName field has 2 properties; one called 'Space' and one called 'Local'.
-	// We only care about 'Local' right now.
-	// We assume the namespace is correct if the local name is correct.
-	for i := 0; i < rXMLName.NumField(); i++ {
-		rXMLTypeField := rXMLName.Type().Field(i)
-		rXMLValueField := rXMLName.Field(i)
+	// the value has been unwrapped
+	return val
+}
 
-		if rXMLTypeField.Name == "Local" && rXMLValueField.String() != path[1] {
-			return reflect.Value{}, fmt.Errorf("invalid XML object path, expected %s, got %s", rXMLValueField.String(), path[1])
+// getNameFromTag gets the name from an xml tag
+// tags take the form: "-" or "namespace name,flag1,flag2,..."
+// the namespace, name and flags are all optional
+// a tag cannot contain a namespace but not a name
+func getNameFromTag(tag string) string {
+	// if the tag is not set then there is no name to obtain
+	if tag == "" {
+		return ""
+	}
+
+	// remove xml namespace from the front of the tag
+	parts := strings.Split(tag, " ")
+	tag = parts[len(parts) - 1]
+
+	// return the XMLName from the front of the remaining tag
+	return strings.Split(tag, ",")[0]
+}
+
+// getExplicitXMLName gets the xml name which is explicitly set in the xml tag on the XMLName field
+func getExplicitXMLName(val reflect.Value) string {
+	// only a value of type reflect.Struct can have an XMLName field
+	if val.Type().Kind() != reflect.Struct {
+		return ""
+	}
+
+	// get the XMLName from the XMLName field, if possible
+	for i := 0; i < val.NumField(); i++ {
+		typeField := val.Type().Field(i)
+
+		if typeField.Name == xmlName {
+			// get the XMLName
+			name := getNameFromTag(typeField.Tag.Get("xml"))
+
+			// if the name has been set, return
+			if name != "" {
+				return name
+			}
+
+			break
 		}
 	}
 
-	rValueField := val.Elem()
-	for i := 2; i < len(path); i++ {
-		rValueField, err = getFieldByXMLTagPrefix(rValueField, path[i])
-		if err != nil {
-			return rValueField, err
-		}
-	}
-
-	return rValueField, nil
+	// xml name not explicitly set
+	return ""
 }
 
 func (d *xopDecoder) decode(respEnvelope *Envelope) error {
@@ -218,20 +290,20 @@ func (d *xopDecoder) decode(respEnvelope *Envelope) error {
 
 		// We're now going through the part to put this part into the proper 'bytes' field of the struct deserialized above.
 		if xopObjPath, ok := d.includes[part.Header.Get("Content-ID")]; ok {
-			// We kind of cheat here and skip the normal 'Envelope/Body' parsing since we know the format
-			// of the message is valid if we properly deserialized the XML object above.
-			// We only support envelope-encoded messages at this point anyways,
-			// and it prevents us from needing to hack around with the generic Content interface stuff here.
-			rResponse := reflect.ValueOf(respEnvelope.Body.Content)
+			rResponse := reflect.ValueOf(respEnvelope)
 
-			field, err := getFieldFromIncludePath(rResponse, xopObjPath)
+			field, err := getFieldFromPath(rResponse, xopObjPath)
 			if err != nil {
 				return err
 			}
 
-			// TODO: Double check this is a byte array
 			if !field.CanSet() {
 				return ErrCannotSetBytesElement
+			}
+
+			// double check field is a slice of bytes
+			if field.Type().String() != "[]uint8" {
+				return errFieldNotArray
 			}
 
 			// We don't read the content until we know we're able to save it (no point reading something we'll never store).
