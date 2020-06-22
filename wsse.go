@@ -36,7 +36,10 @@ const (
 type WSSEAuthInfo struct {
 	certDER string
 	key     *rsa.PrivateKey
+}
 
+// WSSEAuthIDs contains generated IDs used in WS-Security X.509 signing.
+type WSSEAuthIDs struct {
 	securityTokenID string
 	bodyID          string
 }
@@ -180,7 +183,7 @@ type security struct {
 	Signature           signature
 }
 
-func (w *WSSEAuthInfo) generateToken() ([]byte, error) {
+func (w *WSSEAuthIDs) generateToken() ([]byte, error) {
 	// We use a concatentation of the time and 10 securely generated random numbers to be the tokens.
 	b := make([]byte, 10)
 
@@ -198,26 +201,28 @@ func (w *WSSEAuthInfo) generateToken() ([]byte, error) {
 	return tokenHex, nil
 }
 
-func (w *WSSEAuthInfo) generateIDs() error {
+func generateWSSEAuthIDs() (*WSSEAuthIDs, error) {
+	w := &WSSEAuthIDs{}
+
 	securityTokenHex, err := w.generateToken()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	w.securityTokenID = fmt.Sprintf("SecurityToken-%x", securityTokenHex)
 
 	bodyTokenHex, err := w.generateToken()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	w.bodyID = fmt.Sprintf("Body-%x", bodyTokenHex)
-	return nil
+	return w, nil
 }
 
-func (w *WSSEAuthInfo) sign(body Body) (security, error) {
+func (w *WSSEAuthInfo) sign(body Body, ids *WSSEAuthIDs) (security, error) {
 	// 0. We create the body_id and security_token_id values
-	body.ID = w.bodyID
+	body.ID = ids.bodyID
 
 	// 1. We create the DigestValue of the body.
 
@@ -247,7 +252,7 @@ func (w *WSSEAuthInfo) sign(body Body) (security, error) {
 			Algorithm: rsaSha1Sig,
 		},
 		Reference: signatureReference{
-			URI: "#" + w.bodyID,
+			URI: "#" + ids.bodyID,
 			Transforms: transforms{
 				Transform: transform{
 					Algorithm: canonicalizationExclusiveC14N,
@@ -282,7 +287,7 @@ func (w *WSSEAuthInfo) sign(body Body) (security, error) {
 		XMLNS: wsseNS,
 		BinarySecurityToken: binarySecurityToken{
 			XMLNS:        wsuNS,
-			WsuID:        w.securityTokenID,
+			WsuID:        ids.securityTokenID,
 			EncodingType: encTypeBinary,
 			ValueType:    valTypeX509Token,
 			Value:        w.certDER,
@@ -296,7 +301,7 @@ func (w *WSSEAuthInfo) sign(body Body) (security, error) {
 					XMLNS: wsuNS,
 					Reference: strReference{
 						ValueType: valTypeX509Token,
-						URI:       "#" + w.securityTokenID,
+						URI:       "#" + ids.securityTokenID,
 					},
 				},
 			},
