@@ -38,8 +38,8 @@ type WSSEAuthInfo struct {
 	key     *rsa.PrivateKey
 }
 
-// WSSEAuthIds contains generated IDs used in WS-Security X.509 signing.
-type WSSEAuthIds struct {
+// WSSEAuthIDs contains generated IDs used in WS-Security X.509 signing.
+type WSSEAuthIDs struct {
 	securityTokenID string
 	bodyID          string
 }
@@ -183,7 +183,7 @@ type security struct {
 	Signature           signature
 }
 
-func (w *WSSEAuthIds) generateToken() ([]byte, error) {
+func (w *WSSEAuthIDs) generateToken() ([]byte, error) {
 	// We use a concatentation of the time and 10 securely generated random numbers to be the tokens.
 	b := make([]byte, 10)
 
@@ -201,8 +201,8 @@ func (w *WSSEAuthIds) generateToken() ([]byte, error) {
 	return tokenHex, nil
 }
 
-func generateWSSEAuthIds() (*WSSEAuthIds, error) {
-	w := &WSSEAuthIds{}
+func generateWSSEAuthIDs() (*WSSEAuthIDs, error) {
+	w := &WSSEAuthIDs{}
 
 	securityTokenHex, err := w.generateToken()
 	if err != nil {
@@ -220,7 +220,7 @@ func generateWSSEAuthIds() (*WSSEAuthIds, error) {
 	return w, nil
 }
 
-func (w *WSSEAuthInfo) sign(body Body, ids *WSSEAuthIds) (security, error) {
+func (w *WSSEAuthInfo) sign(body Body, ids *WSSEAuthIDs) (security, error) {
 	// 0. We create the body_id and security_token_id values
 	body.ID = ids.bodyID
 

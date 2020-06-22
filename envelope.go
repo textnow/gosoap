@@ -72,7 +72,7 @@ func (e *Envelope) signWithWSSEInfo(info *WSSEAuthInfo) error {
 
 	e.Body.XMLNSWsu = wsuNS
 
-	ids, err := generateWSSEAuthIds()
+	ids, err := generateWSSEAuthIDs()
 	if err != nil {
 		return err
 	}
